@@ -1,0 +1,36 @@
+# Cameras recorded together by record_session.py.
+#
+# Not sure which device number is which camera? Run:
+#     .venv\Scripts\python.exe record_session.py --list
+# It shows a snapshot from every camera it finds, labelled with its number.
+
+# Show a live preview window per camera (press q in any of them to stop the session).
+preview = true
+
+# Mains frequency for anti-flicker: 50 (India/Europe) or 60 (US). Only applied on Linux.
+mains_hz = 50
+
+# If LabRecorder is open, start/stop it automatically and save the .xdf in the session folder.
+labrecorder = true
+
+# One [[camera]] block per camera. name is the LSL stream name and the file prefix.
+# width, height and fps are optional (defaults: 1280, 720, 30).
+
+[[camera]]
+name = "laptop_cam"
+device = 0
+
+[[camera]]
+name = "usb_cam"
+device = 1
+
+# Pupil Core eye tracker. Pupil Capture must be running before you start a session.
+# Its gaze and pupil data go to LSL as pupil_gaze, pupil_pupils and pupil_clock.
+[pupil]
+enabled = true
+# Also save Pupil Capture's own recording (world + eye videos) in <session>/pupil/,
+# so analyze_xdf.py can line the world camera up with the other cameras.
+record = true
+# Where Pupil Capture runs (Network API menu in Pupil Capture). Defaults shown.
+# host = "127.0.0.1"
+# port = 50020
