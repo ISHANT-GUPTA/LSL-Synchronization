@@ -34,3 +34,12 @@ record = true
 # Where Pupil Capture runs (Network API menu in Pupil Capture). Defaults shown.
 # host = "127.0.0.1"
 # port = 50020
+
+# Microphone, streamed to LSL as audio (and saved as a WAV in the session folder).
+# List microphones with:  .venv\Scripts\python.exe record_session.py --list-audio
+[audio]
+enabled = true
+name = "mic"                       # LSL stream name and file prefix
+# device = "AB13X"      # part of the device name (or its number); omit for the default input
+# rate = 48000
+# channels = 1

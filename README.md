@@ -1,6 +1,6 @@
 # LSL_sync
 
-Record several webcams and a Pupil Core eye tracker together over LSL, one folder per session,
+Record several webcams, a Pupil Core eye tracker and a microphone together over LSL, one folder per session,
 then check how well they line up.
 
 Commands below are for Windows. On Linux use `.venv/bin/python` instead of `.venv\Scripts\python.exe`.
@@ -29,6 +29,12 @@ Find out which device number is which camera:
 .venv\Scripts\python.exe record_session.py --list
 ```
 
+and which microphone to use:
+
+```bash
+.venv\Scripts\python.exe record_session.py --list-audio
+```
+
 Then edit [`cameras.toml`](cameras.toml):
 
 | Setting | Default | Meaning |
@@ -41,6 +47,14 @@ Then edit [`cameras.toml`](cameras.toml):
 | `[pupil]` `enabled` | `true` | include the Pupil Core (if the section exists) |
 | `[pupil]` `record` | `true` | Pupil Capture saves world and eye videos into the session |
 | `[pupil]` `host`, `port` | `127.0.0.1`, `50020` | where Pupil Capture runs |
+| `[audio]` `enabled` | `true` | include the microphone (if the section exists) |
+| `[audio]` `name` | `mic` | LSL stream name / file prefix |
+| `[audio]` `device` | default input | part of the microphone's name, or its number from `--list-audio` |
+| `[audio]` `rate`, `channels` | `48000`, `1` | sample rate and channel count |
+
+For the microphone, turn off Windows' audio processing, which gates quiet sound to silence and shifts onset
+timing: *Settings > System > Sound > (your microphone) > Audio enhancements: Off*, and raise *Input volume*
+so speech peaks well above -30 dBFS (the session prints the peak level every 5 s).
 
 ## 3. Record a session
 
@@ -51,6 +65,7 @@ Then edit [`cameras.toml`](cameras.toml):
    ```
    When everything is live, LabRecorder starts recording into the session folder by itself.
 3. To get a sync check, switch the room lights off and on once, where every camera can see it.
+   The switch's click is the sound event for the microphone, so keep the mic near the switch.
 4. Stop with **Ctrl+C**, or **q** in any preview window. Everything stops together and a summary is printed.
 
 | Flag | Effect |
@@ -60,7 +75,9 @@ Then edit [`cameras.toml`](cameras.toml):
 | `--no-preview` | no preview windows |
 | `--no-labrecorder` | don't drive LabRecorder (start it by hand when told) |
 | `--no-pupil` | leave the Pupil Core out |
+| `--no-audio` | leave the microphone out |
 | `--list` | show a labelled snapshot from each camera, then exit |
+| `--list-audio` | list microphones, then exit |
 
 Each session goes into `recordings/<date>_<time>_<label>/`:
 
@@ -70,6 +87,7 @@ Each session goes into `recordings/<date>_<time>_<label>/`:
 | `<camera>_<time>.avi`, `<camera>_<time>_frames.csv` | video, and a backup of each frame's LSL timestamp |
 | `pupil/000/` | Pupil Capture's recording (world and eye videos, gaze) |
 | `pupil_clock.csv` | Pupil time and LSL time pairs |
+| `mic_<time>.wav`, `mic_<time>_blocks.csv` | audio, and a backup of each audio block's LSL timestamp |
 | `session.json`, `session.log` | settings, how each part ended, all console output |
 
 If the summary says **WITH PROBLEMS**, a part failed, or a stream is missing or empty in the XDF. Record again.
@@ -82,8 +100,10 @@ If the summary says **WITH PROBLEMS**, a part failed, or a stream is missing or 
 
 Accepts a session folder or an `.xdf` file. It writes `<session>_side_by_side.mp4` (all cameras, including
 the Pupil world camera, on one timeline) and `<session>_signals.png` into the session folder. It also prints
-frame rates, gaps, Pupil gaze and pupil health, and the offset between cameras at the flash.
-A flash strength below about 8 means no clear flash was found, so ignore the offsets.
+frame rates, gaps, Pupil gaze and pupil health, and the offset between cameras at the flash, plus the
+microphone's offset at the switch's click. The plot gets an audio loudness panel.
+A flash strength below about 8 means no clear flash was found, and a click less than about 20 dB above the
+background is not clear either; ignore those offsets.
 
 | Flag | Effect |
 |---|---|
@@ -111,6 +131,15 @@ Pupil Core relay (Pupil Capture must be running):
 
 Flags: `--host` (127.0.0.1), `--port` (50020), `--name` (`pupil`, prefix of the streams `pupil_gaze`,
 `pupil_pupils`, `pupil_clock`), `--no-record` (don't make Pupil Capture record).
+
+Microphone:
+
+```bash
+.venv\Scripts\python.exe lib\audio_stream.py --device "Headset Microphone" --out-dir recordings\test
+```
+
+Flags: `--device` (default input), `--name` (`mic`), `--rate` (48000), `--channels` (1), `--out-dir`
+(`recordings`), `--list` (list microphones and exit).
 
 ## Good to know
 

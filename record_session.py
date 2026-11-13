@@ -16,6 +16,8 @@ for each camera <name>_<stamp>.avi and <name>_<stamp>_frames.csv, plus:
 and, if [pupil] is enabled in cameras.toml:
     pupil_clock.csv  Pupil time <-> LSL time pairs (backup of the pupil_clock stream)
     pupil/000/       Pupil Capture's own recording (world + eye videos, gaze, ...)
+and, if [audio] is enabled (lib/audio_stream.py; LSL stream named after it, e.g. mic):
+    mic_<stamp>.wav, mic_<stamp>_blocks.csv   the audio, and each block's LSL timestamp
 
 Pupil Core: Pupil Capture must be running (it is the only program that can
 open the headset's cameras). lib/pupil_stream.py relays its gaze and pupil
@@ -46,6 +48,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 CAMERA_SCRIPT = ROOT / "lib" / "camera_stream.py"
 PUPIL_SCRIPT = ROOT / "lib" / "pupil_stream.py"
+AUDIO_SCRIPT = ROOT / "lib" / "audio_stream.py"
 RECORDINGS = ROOT / "recordings"
 DEFAULT_CONFIG = ROOT / "cameras.toml"
 IS_WINDOWS = sys.platform == "win32"
@@ -54,7 +57,8 @@ CAMERA_DEFAULTS = {"width": 1280, "height": 720, "fps": 30}
 CAMERA_KEYS = {"name", "device", *CAMERA_DEFAULTS}
 PUPIL_NAME = "pupil"  # process name in the output, and prefix of its LSL streams and files
 PUPIL_DEFAULTS = {"enabled": True, "record": True, "host": "127.0.0.1", "port": 50020}
-TOP_KEYS = {"camera", "preview", "mains_hz", "labrecorder", "pupil"}
+AUDIO_DEFAULTS = {"enabled": True, "name": "mic", "device": None, "rate": 48000, "channels": 1}
+TOP_KEYS = {"camera", "preview", "mains_hz", "labrecorder", "pupil", "audio"}
 LABRECORDER_PORT = 22345  # LabRecorder's remote control (RCSPort in LabRecorder.cfg)
 NAME_OK = re.compile(r"^[A-Za-z0-9_-]+$")
 # liblsl's own log lines: "2026-11-12 23:41:20.327 (   0.014s) [  DACC905B] netinterfaces.cpp:36   INFO| ..."
@@ -75,6 +79,10 @@ def parse_args():
                    help="don't start/stop LabRecorder automatically")
     p.add_argument("--no-pupil", action="store_true",
                    help="leave the Pupil Core out, even if cameras.toml enables it")
+    p.add_argument("--no-audio", action="store_true",
+                   help="leave the microphone out, even if cameras.toml enables it")
+    p.add_argument("--list-audio", action="store_true",
+                   help="list microphones (input devices) and exit")
     p.add_argument("--list", action="store_true",
                    help="show a snapshot from every camera found, labelled with its device number")
     return p.parse_args()
@@ -134,8 +142,28 @@ def load_config(path):
             sys.exit(f"{path.name}: [pupil]: port must be a number (got {pupil['port']!r})")
         if not pupil.pop("enabled"):
             pupil = None
+
+    audio = None
+    if "audio" in cfg:
+        if not isinstance(cfg["audio"], dict):
+            sys.exit(f"{path.name}: audio must be an [audio] section")
+        unknown = set(cfg["audio"]) - set(AUDIO_DEFAULTS)
+        if unknown:
+            sys.exit(f"{path.name}: [audio]: unknown setting(s) {sorted(unknown)}; "
+                     f"expected {sorted(AUDIO_DEFAULTS)}")
+        audio = {**AUDIO_DEFAULTS, **cfg["audio"]}
+        if not isinstance(audio["name"], str) or not NAME_OK.match(audio["name"]):
+            sys.exit(f"{path.name}: [audio]: name must be letters, digits, _ or - (got {audio['name']!r})")
+        if audio["name"] in names or audio["name"] == PUPIL_NAME:
+            sys.exit(f"{path.name}: [audio]: name '{audio['name']}' is already used")
+        for key in ("rate", "channels"):
+            if not isinstance(audio[key], int) or audio[key] <= 0:
+                sys.exit(f"{path.name}: [audio]: {key} must be a positive whole number")
+        if not audio.pop("enabled"):
+            audio = None
     return {"preview": bool(cfg.get("preview", True)), "mains_hz": mains_hz,
-            "labrecorder": bool(cfg.get("labrecorder", True)), "cameras": cameras, "pupil": pupil}
+            "labrecorder": bool(cfg.get("labrecorder", True)), "cameras": cameras, "pupil": pupil,
+            "audio": audio}
 
 
 class LabRecorder:
@@ -258,6 +286,18 @@ def start_pupil(pupil, session_dir):
            "--host", pupil["host"], "--port", str(pupil["port"])]
     if not pupil["record"]:
         cmd.append("--no-record")
+    env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
+    group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if IS_WINDOWS
+             else {"start_new_session": True})
+    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                            encoding="utf-8", errors="replace", env=env, **group)
+
+
+def start_audio(audio, session_dir):
+    cmd = [sys.executable, str(AUDIO_SCRIPT), "--name", audio["name"], "--out-dir", str(session_dir),
+           "--rate", str(audio["rate"]), "--channels", str(audio["channels"])]
+    if audio["device"] is not None:
+        cmd += ["--device", str(audio["device"])]
     env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
     group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if IS_WINDOWS
              else {"start_new_session": True})
@@ -388,7 +428,8 @@ def record(cfg, config_path, label):
     session_dir = make_session_dir(label)
     names = [c["name"] for c in cfg["cameras"]]
     pupil = cfg["pupil"]
-    sources = names + ([PUPIL_NAME] if pupil else [])
+    audio = cfg["audio"]
+    sources = names + ([PUPIL_NAME] if pupil else []) + ([audio["name"]] if audio else [])
     info = {
         "session": session_dir.name,
         "folder": str(session_dir),
@@ -399,6 +440,7 @@ def record(cfg, config_path, label):
         "mains_hz": cfg["mains_hz"],
         "cameras": cfg["cameras"],
         "pupil": pupil,
+        "audio": audio,
         "started": dt.datetime.now().isoformat(timespec="seconds"),
     }
     write_session_json(session_dir / "session.json", info)
@@ -410,6 +452,10 @@ def record(cfg, config_path, label):
     if pupil:
         out.say(f"Starting Pupil Core relay (Pupil Capture at {pupil['host']}:{pupil['port']}, "
                 + ("recording into pupil/" if pupil["record"] else "not recording") + ")")
+    if audio:
+        out.say(f"Starting microphone '{audio['name']}' ("
+                + (f"device matching \"{audio['device']}\"" if audio["device"] is not None
+                   else "default input device") + f", {audio['rate']} Hz)")
 
     stop_requested = threading.Event()
 
@@ -432,9 +478,16 @@ def record(cfg, config_path, label):
         t = threading.Thread(target=out.pump, args=(PUPIL_NAME, procs[PUPIL_NAME]), daemon=True)
         t.start()
         pumps.append(t)
-    everything = f"All {len(names)} cameras" + (" and the Pupil Core" if pupil else "")
+    if audio:
+        procs[audio["name"]] = start_audio(audio, session_dir)
+        t = threading.Thread(target=out.pump, args=(audio["name"], procs[audio["name"]]), daemon=True)
+        t.start()
+        pumps.append(t)
+    extras = (["the Pupil Core"] if pupil else []) + (["the microphone"] if audio else [])
+    everything = f"All {len(names)} cameras" + "".join(
+        (" and " if i == len(extras) - 1 else ", ") + e for i, e in enumerate(extras))
     stream_names = names + ([f"{PUPIL_NAME}_gaze", f"{PUPIL_NAME}_pupils", f"{PUPIL_NAME}_clock"]
-                            if pupil else [])
+                            if pupil else []) + ([audio["name"]] if audio else [])
 
     announced = False
     reason = None
@@ -451,6 +504,8 @@ def record(cfg, config_path, label):
                         reason = f"{name} failed with exit code {code}"
                     elif name == PUPIL_NAME:
                         reason = "the Pupil Core relay stopped"
+                    elif audio and name == audio["name"]:
+                        reason = "the microphone stopped"
                     else:
                         reason = f"{name} stopped (q pressed?)"
                     break
@@ -549,6 +604,8 @@ def main():
     if args.list:
         list_cameras(args.config)
         return 0
+    if args.list_audio:
+        return subprocess.call([sys.executable, str(AUDIO_SCRIPT), "--list"])
     cfg = load_config(args.config)
     if args.no_preview:
         cfg["preview"] = False
@@ -556,6 +613,8 @@ def main():
         cfg["labrecorder"] = False
     if args.no_pupil:
         cfg["pupil"] = None
+    if args.no_audio:
+        cfg["audio"] = None
     return record(cfg, args.config, args.label)
 
 

@@ -62,6 +62,7 @@ def parse_args():
 
 
 PUPIL_TYPES = {"Gaze", "Pupil", "PupilClock"}  # streams from lib/pupil_stream.py
+AUDIO_ENV_S = 0.001  # audio loudness is measured in 1 ms bins
 
 
 def camera_streams(streams):
@@ -71,7 +72,7 @@ def camera_streams(streams):
         info = s["info"]
         name = info["name"][0]
         if info["type"][0] != "VideoFrames":
-            if info["type"][0] not in PUPIL_TYPES:
+            if info["type"][0] not in PUPIL_TYPES | {"Audio"}:
                 print(f"  skipping stream '{name}' (type {info['type'][0]})")
             continue
         if len(s["time_stamps"]) == 0:
@@ -135,6 +136,54 @@ def pupil_world_camera(streams):
         return None
     return {"name": f"{prefix}_world", "ts": world_lsl[keep], "frame_idx": keep, "video": video,
             "pupil": True}
+
+
+def audio_tracks(streams):
+    """One dict per Audio stream (lib/audio_stream.py): name, and loudness per 1 ms bin in LSL time.
+
+    pyxdf has already fitted the timestamps to the stream's nominal rate
+    (dejitter), which removes the sound card's clock drift and arrival jitter.
+    """
+    tracks = []
+    for s in streams:
+        if s["info"]["type"][0] != "Audio" or len(s["time_stamps"]) < 2:
+            continue
+        name = s["info"]["name"][0]
+        ts = np.asarray(s["time_stamps"], dtype=float)
+        x = np.abs(np.asarray(s["time_series"], dtype=np.float32)).max(axis=1) / 32768.0
+        edges = np.arange(ts[0], ts[-1], AUDIO_ENV_S)
+        idx = np.searchsorted(ts, edges)
+        env = np.maximum.reduceat(x, idx[:-1]) if len(idx) > 1 else x[:1]
+        rate = (len(ts) - 1) / (ts[-1] - ts[0])
+        print(f"  {name}: audio {rate:.1f} Hz over {ts[-1] - ts[0]:.1f} s, peak "
+              f"{20 * np.log10(max(x.max(), 1e-6)):.1f} dBFS")
+        tracks.append({"name": name, "t": edges[:-1], "env": env})
+    return tracks
+
+
+def audio_onset(track, around, t0, half_window=0.5):
+    """Start of the sharpest sound within +-half_window s of `around` (relative to t0).
+
+    Returns (onset relative to t0, strength in dB above the background), or (None, 0).
+    The onset is where loudness first rises 20% of the way from the background
+    to the peak, just before the peak.
+    """
+    t = track["t"] - t0
+    sel = np.where(np.abs(t - around) <= half_window)[0]
+    if len(sel) < 50:
+        return None, 0.0
+    env = track["env"][sel]
+    rise = np.diff(env, prepend=env[0])
+    k = int(np.argmax(rise))                      # steepest jump in loudness
+    before = env[max(0, k - 200):max(1, k - 5)]   # ~0.2 s before it
+    floor = float(np.median(before)) if len(before) else float(env.min())
+    peak = float(env[k:k + 30].max())
+    strength = 20 * np.log10(max(peak, 1e-6) / max(floor, 1e-6))
+    level = floor + 0.2 * (peak - floor)
+    j = k
+    while j > 0 and env[j - 1] > level:
+        j -= 1
+    return float(t[sel[j]]), strength
 
 
 def summarize_pupil(streams):
@@ -301,6 +350,7 @@ def main():
     if not cams:
         sys.exit("No usable VideoFrames streams found.")
     summarize_pupil(streams)
+    audio = audio_tracks(streams)
 
     if args.out_dir:
         out_dir = Path(args.out_dir)
@@ -343,17 +393,22 @@ def main():
     onsets = {cam["name"]: onset_time(cam["ts"] - t0, signals[cam["name"]][0], event_t)
               for cam in cams}
 
-    fig, axes = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
+    fig, axes = plt.subplots(3 if audio else 2, 1, figsize=(12, 8.5 if audio else 6), sharex=True)
     for cam in cams:
         b, m = signals[cam["name"]]
         t = cam["ts"] - t0
         axes[0].plot(t, b, label=cam["name"])
         axes[1].plot(t, m, label=cam["name"])
+    for tr in audio:
+        keep = (tr["t"] >= t0) & (tr["t"] <= t1)
+        axes[2].plot(tr["t"][keep] - t0, tr["env"][keep], lw=0.6, label=tr["name"])
+    if audio:
+        axes[2].set_ylabel("audio loudness (peak per ms)")
     for ax in axes:
         ax.axvline(event_t, color="k", ls="--", lw=0.8, alpha=0.6)
     axes[0].set_ylabel("mean brightness")
     axes[1].set_ylabel("motion (frame difference)")
-    axes[1].set_xlabel("time since start of shared window (s)")
+    axes[-1].set_xlabel("time since start of shared window (s)")
     for ax in axes:
         ax.legend()
         ax.grid(alpha=0.3)
@@ -374,6 +429,17 @@ def main():
             print(f"{cam['name']:<{w}}{'n/a':>11}")
             continue
         print(f"{cam['name']:<{w}}{o:>11.4f}{1000 * (o - onsets[ref]):>+13.1f} ms")
+    for tr in audio:
+        o, s = audio_onset(tr, event_t, t0)
+        if o is None or onsets[ref] is None or s < 6:  # no sound event at all near the flash
+            print(f"{tr['name']:<{w}}{'n/a':>11}")
+            continue
+        print(f"{tr['name']:<{w}}{o:>11.4f}{1000 * (o - onsets[ref]):>+13.1f} ms   "
+              f"(sound {s:.0f} dB above background"
+              + ("; below ~20 dB is not a clear click, ignore" if s < 20 else "") + ")")
+    if audio:
+        print(" Audio: the light switch's click is the sound event. A camera onset can lag the click\n"
+              " by up to a frame (33 ms), since light changes during a frame show up half-way.")
     print(f"(one frame = {frame_ms:.0f} ms; offsets well under a frame mean the streams are in sync.\n"
           f" Onsets are where brightness is halfway up, interpolated between frames.)")
 

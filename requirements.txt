@@ -5,3 +5,4 @@ opencv-python==5.0.0.93
 pylsl==1.18.6
 pyxdf==1.18.0
 pyzmq==27.3.0
+sounddevice==0.5.6
